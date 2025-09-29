@@ -58,10 +58,7 @@ def _stringify_for_csv(val):
             return str(val)
     return "" if val is None else str(val)
 
-def enrich_tax_records_csv(
-    csv_path: str = "/data/TaxRecords.csv",
-    batch_size: int = 50,
-) -> str:
+def enrich_tax_records_csv():
     """
     Reads TaxRecords.csv, fetches enrichment using Google Gemini,
     and writes the results back into the SAME CSV (creates a .bak first).
@@ -80,6 +77,8 @@ def enrich_tax_records_csv(
             logger.warning("GENAI_API_KEY not set; enrichment will add empty values.")
 
     # Read CSV
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
     df = pd.read_csv(csv_path, low_memory=False)
 
     # Add enrichment columns if missing
@@ -184,24 +183,7 @@ def enrich_tax_records_csv(
     logger.info(f"Enriched CSV written to {csv_path}; backup at {backup_path}")
     return csv_path
 
-# Wire it into CLI entrypoint:
 
-def _maybe_run_tax_enrichment():
-    should_run = os.getenv("ENRICH_TAX_CSV", "false").lower() in ("1","true","yes","y")
-    default_csv = "/data/TaxRecords.csv"
-    path = os.getenv("TAX_CSV_PATH", default_csv if os.path.exists(default_csv) else "")
-    if should_run and path:
-        try:
-            enrich_tax_records_csv(path)
-        except Exception as e:
-            logger.error(f"Failed to enrich tax records CSV: {e}")
-    default_csv = "/data/TaxRecords.csv"
-    path = os.getenv("TAX_CSV_PATH", default_csv if Path(default_csv).exists() else "")
-    if should_run and path:
-        try:
-            enrich_tax_records_csv(path)
-        except Exception as e:
-            logger.error(f"Failed to enrich tax records CSV: {e}")
 
 # Call before the existing main() fallthrough (in Lambda it's harmless)
-_maybe_run_tax_enrichment()
+enrich_tax_records_csv()
