@@ -86,6 +86,7 @@ def enrich_tax_records_csv():
     df = _ensure_columns(df, enrich_cols)
 
     # Build prompts based on existing columns
+    batch_size = 50
     prompts = []
     row_indices = []
     acn_prompts = []
