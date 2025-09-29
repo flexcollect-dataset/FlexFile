@@ -86,7 +86,7 @@ def enrich_tax_records_csv():
     df = _ensure_columns(df, enrich_cols)
 
     # Build prompts based on existing columns
-    batch_size = 50
+    batch_size = 60
     prompts = []
     row_indices = []
     acn_prompts = []
@@ -116,7 +116,7 @@ def enrich_tax_records_csv():
             batch = prompts[start:start+batch_size]
             try:
                 resp = GENAI_CLIENT.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-2.0-flash",
                     contents=batch,
                     config={
                         "response_mime_type": "application/json",
@@ -124,6 +124,7 @@ def enrich_tax_records_csv():
                     },
                 )
                 results.extend(resp.parsed)
+                logger.info(f"Gemini data1")
             except Exception as e:
                 logger.warning(f"Gemini enrichment error: {e}")
                 # Fallback to blanks for this batch
@@ -142,7 +143,7 @@ def enrich_tax_records_csv():
             batch = acn_prompts[start:start+batch_size]
             try:
                 dresp = GENAI_CLIENT.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-2.0-flash",
                     contents=batch,
                     config={
                         "response_mime_type": "application/json",
@@ -150,6 +151,7 @@ def enrich_tax_records_csv():
                     },
                 )
                 acn_results.extend(dresp.parsed)
+                logger.info(f"Gemini data2")
             except Exception as e:
                 logger.warning(f"Gemini ACN docs error: {e}")
                 acn_results.extend([ACNDocumentsDetails(documentid="", dateofpublication="", noticetype="") for _ in batch])
@@ -167,6 +169,7 @@ def enrich_tax_records_csv():
             df.at[ridx, "SocialLink"] = _stringify_for_csv(r.SocialLink)
             df.at[ridx, "Review"] = _stringify_for_csv(r.review)
             df.at[ridx, "Industry_enriched"] = _stringify_for_csv(r.Industry)
+            logger.info(f"Merging data")
 
     for offset, ridx in enumerate(acn_row_indices):
         if offset < len(acn_results):
