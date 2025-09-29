@@ -1,0 +1,88 @@
+name: Build & Deploy Lambda (Container)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # for OIDC
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME }}
+
+  TASKDEF_FILE: infra/ecrtask.json
+  CONTAINER_NAME: flexcollect-file
+  TASK_FAMILY: flexcollect-task-file
+
+  # NEW: role names and optional app policies to attach to the task role
+  EXECUTION_ROLE_NAME: ecsTaskExecutionRole
+  TASK_ROLE_NAME: flexcollectTaskRole
+  
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS creds
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/GitHubDeployRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        run: |
+          IMAGE_TAG=${GITHUB_SHA}
+          IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          docker build --platform linux/amd64 -t "$IMAGE_URI" .
+
+      - name: Push image
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          LATEST="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest"
+
+          # (optional) export for later steps
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+          echo "LATEST=$LATEST" >> "$GITHUB_ENV"
+
+          docker push "$IMAGE_URI"
+          docker tag "$IMAGE_URI" "$LATEST"
+          docker push "$LATEST"
+
+      # >>> NEW: Render ECS task definition with the fresh image
+      - name: Render task definition (ECS)
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.TASKDEF_FILE }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ env.IMAGE_URI }}
+
+      # >>> NEW: Register the rendered task definition as a new revision
+      - name: Register task definition (ECS)
+        id: register
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The render action outputs a path to the rendered file
+          RENDERED="${{ steps.render.outputs.task-definition }}"
+          ARN=$(aws ecs register-task-definition \
+            --cli-input-json "file://${RENDERED}" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "TASK_DEF_ARN=${ARN}" >> $GITHUB_ENV
+          echo "Registered: ${ARN}"
+
+      # (Optional) show the ARN
+      - name: Output task def revision
+        run: echo "${{ env.TASK_DEF_ARN }}"
