@@ -82,6 +82,7 @@ def _call_gemini_batch(contents: List[str], response_schema, fallback_factory):
                 "response_schema": response_schema,
             },
         )
+        logger.info("Response array (JSON): %s", json.dumps(resp.parsed, indent=2))
         return resp.parsed
     except Exception as e:
         logger.warning(f"Gemini batch error: {e}")
@@ -177,7 +178,6 @@ def enrich_tax_records_csv():
                     ]
                     for fut in futures:
                         batch_result = fut.result()
-                        print(batch_result)
                         results.extend(batch_result)
                 logger.info("Gemini data1")
                 if BATCH_PAUSE_SECONDS > 0 and window_start + ABN_DETAILS_CONCURRENCY < len(abn_batches):
