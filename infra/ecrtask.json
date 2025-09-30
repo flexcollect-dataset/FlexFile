@@ -21,7 +21,9 @@
         { "name": "BATCH_PAUSE_SECONDS", "value": "0" },
         { "name": "GST_FILTER", "value": "" },
         { "name": "MAX_POSTCODES", "value": "0" },
-        { "name": "POSTCODE_START_INDEX", "value": "0" }
+        { "name": "POSTCODE_START_INDEX", "value": "0" },
+        { "name": "OUTPUT_S3_BUCKET", "value": "your-bucket-name" },
+        { "name": "OUTPUT_S3_KEY", "value": "enriched/TaxRecords.csv" }
       ],
       "entryPoint": ["python","-u","-m","src.lambda_function"],
       "logConfiguration": {

@@ -15,6 +15,7 @@ from urllib3.util.retry import Retry
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
+import boto3
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -82,6 +83,22 @@ def _call_gemini_batch(contents: List[str], response_schema, fallback_factory):
     except Exception as e:
         logger.warning(f"Gemini batch error: {e}")
         return [fallback_factory() for _ in contents]
+
+def _maybe_upload_to_s3(local_path: str) -> None:
+    bucket = os.getenv("OUTPUT_S3_BUCKET", "").strip()
+    if not bucket:
+        return
+    key = os.getenv("OUTPUT_S3_KEY", "").strip()
+    if not key:
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        base = os.path.basename(local_path)
+        key = f"enriched/{ts}-{base}"
+    try:
+        s3 = boto3.client("s3")
+        s3.upload_file(local_path, bucket, key)
+        logger.info(f"Uploaded enriched CSV to s3://{bucket}/{key}")
+    except Exception as e:
+        logger.error(f"Failed to upload to S3: {e}")
 
 def enrich_tax_records_csv():
     """
@@ -213,6 +230,7 @@ def enrich_tax_records_csv():
     backup_path = str(csv_path) + ".bak"
     shutil.copyfile(csv_path, backup_path)
     df.to_csv(csv_path, index=False)
+    _maybe_upload_to_s3(csv_path)
     logger.info(f"Enriched CSV written to {csv_path}; backup at {backup_path}")
     return csv_path
 

@@ -18,6 +18,9 @@ This project now runs directly as an ECS Fargate task. The container executes `s
 2. Update `infra/ecrtask.json`:
    - Set `containerDefinitions[0].image` to your `IMAGE_URI`.
    - Keep `entryPoint` as `["python","-u","-m","src.lambda_function"]`.
+   - For S3 output, set:
+     - `OUTPUT_S3_BUCKET` to your destination bucket
+     - `OUTPUT_S3_KEY` (optional). If omitted, a timestamped key under `enriched/` is used.
 3. Register the task definition:
    - ```bash
      aws ecs register-task-definition --cli-input-json file://infra/ecrtask.json | cat
@@ -44,6 +47,8 @@ Environment variables:
 - `RESUME_FROM_DB` (default: `true`): when true, resume from DB progress; set to `false` to always start from the beginning (or use `POSTCODE_START_INDEX`).
 - `POSTCODE_START_INDEX`: optional zero-based index into the CSV to define a manual starting point.
 - `MAX_POSTCODES`: optional cap on how many postcodes to process this run.
+- `OUTPUT_S3_BUCKET`: when set, the enriched `/app/data/TaxRecords.csv` is uploaded to this S3 bucket after write.
+- `OUTPUT_S3_KEY`: optional object key. Defaults to `enriched/<timestamp>-TaxRecords.csv`.
 
 Resetting progress:
 
