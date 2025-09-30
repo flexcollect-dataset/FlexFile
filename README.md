@@ -33,6 +33,54 @@ This project now runs directly as an ECS Fargate task. The container executes `s
 
 Optional: To pass parameters to the task, set the env var `FC_EVENT_JSON` as a container override when calling `run-task`. The runner will decode it and forward it to your handler.
 
+### Using S3 for TaxRecords.csv
+
+By default the container reads and writes `data/TaxRecords.csv` inside the image. To use Amazon S3 instead, set the environment variable `TAX_CSV_S3_URI` to the object URI, for example:
+
+```
+TAX_CSV_S3_URI=s3://my-bucket/path/TaxRecords.csv
+```
+
+When set:
+- The task downloads the CSV from S3 to a temp directory, enriches it, then uploads the result back to the same key.
+- A timestamped backup of the original object is created alongside the key, e.g. `TaxRecords.csv.bak-20250101T120000Z`.
+
+Required IAM permissions on the task role (minimum):
+
+```
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:CopyObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::my-bucket/path/TaxRecords.csv",
+        "arn:aws:s3:::my-bucket/path/TaxRecords.csv.bak-*"
+      ]
+    }
+  ]
+}
+```
+
+You also need `s3:ListBucket` on the bucket if your policies require it for `GetObject` path enforcement:
+
+```
+{
+  "Effect": "Allow",
+  "Action": ["s3:ListBucket"],
+  "Resource": "arn:aws:s3:::my-bucket"
+}
+```
+
+Notes:
+- Ensure the container has network access to S3 (public endpoints or VPC endpoint).
+- `boto3` is included in `requirements.txt`.
+
 ### Resume and Idempotency
 
 - ABN inserts are idempotent. Table `abn` has a unique index on `Abn` and inserts use `ON CONFLICT (Abn) DO NOTHING`.

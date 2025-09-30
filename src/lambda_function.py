@@ -15,6 +15,10 @@ from urllib3.util.retry import Retry
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
+from urllib.parse import urlparse
+import tempfile
+import boto3
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -101,10 +105,30 @@ def enrich_tax_records_csv():
         else:
             logger.warning("GENAI_API_KEY not set; enrichment will add empty values.")
 
-    # Read CSV
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
-    df = pd.read_csv(csv_path, low_memory=False)
+    # Read CSV from local path or S3 depending on TAX_CSV_S3_URI
+    s3_uri = (os.getenv("TAX_CSV_S3_URI") or "").strip()
+    is_s3 = s3_uri.startswith("s3://")
+    temp_dir = None
+    s3_client = None
+    s3_bucket = None
+    s3_key = None
+
+    if is_s3:
+        parsed = urlparse(s3_uri)
+        s3_bucket = parsed.netloc
+        s3_key = parsed.path.lstrip("/")
+        if not s3_bucket or not s3_key:
+            raise ValueError(f"Invalid TAX_CSV_S3_URI '{s3_uri}'. Expected format s3://bucket/key.csv")
+        s3_client = boto3.client("s3")
+        temp_dir = tempfile.mkdtemp(prefix="flexcollect_")
+        local_input = os.path.join(temp_dir, "TaxRecords.csv")
+        logger.info(f"Downloading CSV from s3://{s3_bucket}/{s3_key} to {local_input}")
+        s3_client.download_file(s3_bucket, s3_key, local_input)
+        df = pd.read_csv(local_input, low_memory=False)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
+        df = pd.read_csv(csv_path, low_memory=False)
 
     # Add enrichment columns if missing
     enrich_cols = ["Contact", "Website", "Address", "Email", "SocialLink", "Review", "Industry_enriched", "Documents"]
@@ -209,12 +233,34 @@ def enrich_tax_records_csv():
                 "noticetype": doc.noticetype,
             })
 
-    # Backup then write in-place
-    backup_path = str(csv_path) + ".bak"
-    shutil.copyfile(csv_path, backup_path)
-    df.to_csv(csv_path, index=False)
-    logger.info(f"Enriched CSV written to {csv_path}; backup at {backup_path}")
-    return csv_path
+    # Write back (S3 or local)
+    if is_s3:
+        assert s3_client is not None
+        assert temp_dir is not None
+        # Backup original object with timestamped suffix
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_key = f"{s3_key}.bak-{ts}"
+        logger.info(f"Creating backup s3://{s3_bucket}/{backup_key}")
+        s3_client.copy_object(Bucket=s3_bucket, CopySource={"Bucket": s3_bucket, "Key": s3_key}, Key=backup_key)
+
+        local_output = os.path.join(temp_dir, "TaxRecords.out.csv")
+        df.to_csv(local_output, index=False)
+        logger.info(f"Uploading enriched CSV to s3://{s3_bucket}/{s3_key}")
+        s3_client.upload_file(local_output, s3_bucket, s3_key)
+
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass
+        logger.info(f"Enriched CSV written to s3://{s3_bucket}/{s3_key}; backup at s3://{s3_bucket}/{backup_key}")
+        return f"s3://{s3_bucket}/{s3_key}"
+    else:
+        # Backup then write in-place
+        backup_path = str(csv_path) + ".bak"
+        shutil.copyfile(csv_path, backup_path)
+        df.to_csv(csv_path, index=False)
+        logger.info(f"Enriched CSV written to {csv_path}; backup at {backup_path}")
+        return csv_path
 
 
 
