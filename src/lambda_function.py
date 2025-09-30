@@ -147,7 +147,7 @@ def enrich_tax_records_csv():
         state = (str(row.get("state") or "")).strip()
         if entity:
             prompts.append(
-                f"Give me the website, contact number, social media links, total reviews, Industry and address of '{entity}', {state}, Australia. Return JSON with keys Contact, Website, Address, Email, SocialLink (array), review, Industry. Use review format like 4/5."
+                f"give me the website, contact number, social media links, total reviews, Industry and address of '{entity}', {state}, Australia. I want review in format of 4/5 like that"
             )
             row_indices.append(i)
         # If ACN exists, ask for ASIC published notices
