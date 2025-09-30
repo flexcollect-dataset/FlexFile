@@ -16,13 +16,13 @@
         { "name": "GENAI_API_KEY", "value": "AIzaSyD1VmH7wuQVqxld5LeKjF79eRq1gqVrNFA" },
         { "name": "BATCH_SIZE", "value": "200" },
         { "name": "GENAI_BATCH_SIZE", "value": "50" },
-        { "name": "ABN_DETAILS_CONCURRENCY", "value": "5" },
+        { "name": "ABN_DETAILS_CONCURRENCY", "value": "10" },
         { "name": "REQUEST_TIMEOUT", "value": "10" },
         { "name": "BATCH_PAUSE_SECONDS", "value": "0" },
         { "name": "GST_FILTER", "value": "" },
         { "name": "MAX_POSTCODES", "value": "0" },
         { "name": "POSTCODE_START_INDEX", "value": "0" },
-        { "name": "TAX_CSV_S3_URI", "value": "s3://your-bucket/path/TaxRecords.csv" }
+        { "name": "TAX_CSV_S3_URI", "value": "s3://lambdadependency1/TaxRecords.csv" }
       ],
       "entryPoint": ["python","-u","-m","src.lambda_function"],
       "logConfiguration": {

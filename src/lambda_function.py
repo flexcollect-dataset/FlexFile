@@ -28,7 +28,7 @@ GENAI_CLIENT = genai.Client(api_key=GENAI_API_KEY) if GENAI_API_KEY else None
 
 # Concurrency and batching configuration (env-configurable)
 GENAI_BATCH_SIZE = int(os.getenv("GENAI_BATCH_SIZE", "50"))
-ABN_DETAILS_CONCURRENCY = int(os.getenv("ABN_DETAILS_CONCURRENCY", "5"))
+ABN_DETAILS_CONCURRENCY = int(os.getenv("ABN_DETAILS_CONCURRENCY", "10"))
 BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "0"))
 
 # --- Models (moved to module scope to avoid redefinition) ---
