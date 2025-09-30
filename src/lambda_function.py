@@ -22,6 +22,11 @@ logger.setLevel(logging.INFO)
 GENAI_API_KEY = "AIzaSyD1VmH7wuQVqxld5LeKjF79eRq1gqVrNFA"
 GENAI_CLIENT = genai.Client(api_key=GENAI_API_KEY) if GENAI_API_KEY else None
 
+# Concurrency and batching configuration (env-configurable)
+GENAI_BATCH_SIZE = int(os.getenv("GENAI_BATCH_SIZE", "50"))
+ABN_DETAILS_CONCURRENCY = int(os.getenv("ABN_DETAILS_CONCURRENCY", "5"))
+BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "0"))
+
 # --- Models (moved to module scope to avoid redefinition) ---
 class ABNDetails(BaseModel):
     Contact: str
@@ -58,6 +63,26 @@ def _stringify_for_csv(val):
             return str(val)
     return "" if val is None else str(val)
 
+def _chunk_list(items: List[str], chunk_size: int) -> List[List[str]]:
+    if chunk_size <= 0:
+        return [items]
+    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+def _call_gemini_batch(contents: List[str], response_schema, fallback_factory):
+    try:
+        resp = GENAI_CLIENT.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=contents,
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": response_schema,
+            },
+        )
+        return resp.parsed
+    except Exception as e:
+        logger.warning(f"Gemini batch error: {e}")
+        return [fallback_factory() for _ in contents]
+
 def enrich_tax_records_csv():
     """
     Reads TaxRecords.csv, fetches enrichment using Google Gemini,
@@ -86,7 +111,7 @@ def enrich_tax_records_csv():
     df = _ensure_columns(df, enrich_cols)
 
     # Build prompts based on existing columns
-    batch_size = 60
+    batch_size = GENAI_BATCH_SIZE
     prompts = []
     row_indices = []
     acn_prompts = []
@@ -109,52 +134,56 @@ def enrich_tax_records_csv():
             )
             acn_row_indices.append(i)
 
-    # Call Gemini for entity enrichment in batches
+    # Call Gemini for entity enrichment in batches with concurrency
     results = []
     if GENAI_CLIENT and prompts:
-        for start in range(0, len(prompts), batch_size):
-            batch = prompts[start:start+batch_size]
-            try:
-                resp = GENAI_CLIENT.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=batch,
-                    config={
-                        "response_mime_type": "application/json",
-                        "response_schema": list[ABNDetails],
-                    },
-                )
-                results.extend(resp.parsed)
-                logger.info(f"Gemini data1")
-            except Exception as e:
-                logger.warning(f"Gemini enrichment error: {e}")
-                # Fallback to blanks for this batch
-                results.extend([
-                    ABNDetails(Contact="", Website="", Address="", Email="", SocialLink=[], review="", Industry="")
-                    for _ in batch
-                ])
+        abn_batches = _chunk_list(prompts, batch_size)
+        if abn_batches:
+            for window_start in range(0, len(abn_batches), ABN_DETAILS_CONCURRENCY):
+                window_batches = abn_batches[window_start:window_start + ABN_DETAILS_CONCURRENCY]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=ABN_DETAILS_CONCURRENCY) as executor:
+                    futures = [
+                        executor.submit(
+                            _call_gemini_batch,
+                            batch,
+                            list[ABNDetails],
+                            lambda: ABNDetails(Contact="", Website="", Address="", Email="", SocialLink=[], review="", Industry=""),
+                        )
+                        for batch in window_batches
+                    ]
+                    for fut in futures:
+                        batch_result = fut.result()
+                        results.extend(batch_result)
+                logger.info("Gemini data1")
+                if BATCH_PAUSE_SECONDS > 0 and window_start + ABN_DETAILS_CONCURRENCY < len(abn_batches):
+                    time.sleep(BATCH_PAUSE_SECONDS)
     else:
         # No client => blanks
         results = [ABNDetails(Contact="", Website="", Address="", Email="", SocialLink=[], review="", Industry="") for _ in prompts]
 
-    # Call Gemini for ACN notices
+    # Call Gemini for ACN notices with concurrency
     acn_results = []
     if GENAI_CLIENT and acn_prompts:
-        for start in range(0, len(acn_prompts), batch_size):
-            batch = acn_prompts[start:start+batch_size]
-            try:
-                dresp = GENAI_CLIENT.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=batch,
-                    config={
-                        "response_mime_type": "application/json",
-                        "response_schema": list[ACNDocumentsDetails],
-                    },
-                )
-                acn_results.extend(dresp.parsed)
-                logger.info(f"Gemini data2")
-            except Exception as e:
-                logger.warning(f"Gemini ACN docs error: {e}")
-                acn_results.extend([ACNDocumentsDetails(documentid="", dateofpublication="", noticetype="") for _ in batch])
+        acn_batches = _chunk_list(acn_prompts, batch_size)
+        if acn_batches:
+            for window_start in range(0, len(acn_batches), ABN_DETAILS_CONCURRENCY):
+                window_batches = acn_batches[window_start:window_start + ABN_DETAILS_CONCURRENCY]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=ABN_DETAILS_CONCURRENCY) as executor:
+                    futures = [
+                        executor.submit(
+                            _call_gemini_batch,
+                            batch,
+                            list[ACNDocumentsDetails],
+                            lambda: ACNDocumentsDetails(documentid="", dateofpublication="", noticetype=""),
+                        )
+                        for batch in window_batches
+                    ]
+                    for fut in futures:
+                        batch_result = fut.result()
+                        acn_results.extend(batch_result)
+                logger.info("Gemini data2")
+                if BATCH_PAUSE_SECONDS > 0 and window_start + ABN_DETAILS_CONCURRENCY < len(acn_batches):
+                    time.sleep(BATCH_PAUSE_SECONDS)
     else:
         acn_results = [ACNDocumentsDetails(documentid="", dateofpublication="", noticetype="") for _ in acn_prompts]
 
