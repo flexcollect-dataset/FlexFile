@@ -18,4 +18,4 @@ COPY src/ /app/src/
 COPY data/ /app/data/
 
 # Default command runs the main logic directly
-CMD ["python","-u","-m","src.lambda_function.enrich_tax_records_csv"]
+CMD ["python","-u","-m","src.lambda_function"]

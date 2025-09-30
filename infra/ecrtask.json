@@ -23,7 +23,7 @@
         { "name": "MAX_POSTCODES", "value": "0" },
         { "name": "POSTCODE_START_INDEX", "value": "0" }
       ],
-      "entryPoint": ["python","-u","-m","src.lambda_function.enrich_tax_records_csv"],
+      "entryPoint": ["python","-u","-m","src.lambda_function"],
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
