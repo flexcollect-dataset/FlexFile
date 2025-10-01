@@ -23,7 +23,7 @@ BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
 ABN_DETAILS_CONCURRENCY = int(os.getenv("ABN_DETAILS_CONCURRENCY", "5"))
 
 
-def lambda_handler(event, context):
+def lambda_handler():
     logger.info(f"entering in function")
     s3_uri = (os.getenv("TAX_CSV_S3_URI") or "").strip()
     is_s3 = s3_uri.startswith("s3://")
@@ -189,3 +189,6 @@ def lambda_handler(event, context):
 
     logger.info("Completed enrichment and CSV write")
     return {"statusCode": 200, "body": json.dumps({"rows": len(df)})}
+
+if __name__ == "__main__":
+    lambda_handler()
