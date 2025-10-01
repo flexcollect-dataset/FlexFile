@@ -16,7 +16,7 @@
         { "name": "ABN_DETAILS_CONCURRENCY", "value": "5" },
         { "name": "TAX_CSV_S3_URI", "value": "s3://lambdadependency1/TaxRecords.csv" }
       ],
-      "entryPoint": ["python","-u","-m","src.lambda_function"],
+      "entryPoint": ["python","-u","-m","src.lambda_function.lambda_handler"],
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {

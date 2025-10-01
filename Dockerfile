@@ -18,4 +18,4 @@ COPY src/ /app/src/
 COPY data/ /app/data/
 
 # Default command runs the main logic directly
-CMD ["python","-u","-m","src.lambda_function"]
+CMD ["python","-u","-m","src.lambda_function.lambda_handler"]

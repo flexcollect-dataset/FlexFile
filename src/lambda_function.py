@@ -24,6 +24,7 @@ ABN_DETAILS_CONCURRENCY = int(os.getenv("ABN_DETAILS_CONCURRENCY", "5"))
 
 
 def lambda_handler(event, context):
+    logger.info(f"entering in function")
     s3_uri = (os.getenv("TAX_CSV_S3_URI") or "").strip()
     is_s3 = s3_uri.startswith("s3://")
     temp_dir = None
@@ -43,6 +44,7 @@ def lambda_handler(event, context):
         logger.info(f"Downloading CSV from s3://{s3_bucket}/{s3_key} to {local_input}")
         s3_client.download_file(s3_bucket, s3_key, local_input)
         df = pd.read_csv(local_input, low_memory=False)
+        logger.info(f"reading csv file in function")
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
@@ -98,6 +100,7 @@ def lambda_handler(event, context):
                 password=DB_PASS,
                 port=DB_PORT,
             )
+            logger.info(f"Connect to the dataset")
             with conn_local.cursor() as cur:
                 # Try lowercase column name first, then fallback to quoted case
                 try:
