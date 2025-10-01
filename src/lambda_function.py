@@ -109,13 +109,21 @@ def lambda_handler():
     if not abn_column:
         raise ValueError("Input CSV must contain an 'abn' column")
 
-    # Ensure ABN is string type and trimmed
-    df[abn_column] = df[abn_column].astype(str).str.strip()
+    # Ensure ABN uses pandas string dtype (keeps <NA>), trim, strip non-digits, remove trailing .0 from floaty parses
+    df[abn_column] = (
+        df[abn_column]
+            .astype("string")
+            .str.strip()
+            .str.replace(r"\\.0$", "", regex=True)
+            .str.replace(r"[^0-9]", "", regex=True)
+    )
+    # Replace missing with empty string to avoid 'nan' in output
+    df[abn_column] = df[abn_column].fillna("")
 
     # Concurrently fetch details per unique ABN
-    unique_abns: List[str] = (
-        df[abn_column].dropna().astype(str).str.strip().unique().tolist()
-    )
+    # Build list of valid 11-digit ABNs only
+    unique_abns_series = df[abn_column].dropna().astype("string").str.strip()
+    unique_abns: List[str] = [a for a in unique_abns_series.unique().tolist() if isinstance(a, str) and len(a) == 11 and a.isdigit()]
 
     logger.info(
         f"Fetching details for {len(unique_abns)} unique ABNs with concurrency={ABN_DETAILS_CONCURRENCY}"
@@ -128,6 +136,10 @@ def lambda_handler():
 
     # Merge details back into the DataFrame on ABN
     details_df = pd.DataFrame(details)
+    # Deduplicate fetched details by ABN to prevent exploding rows on merge
+    if not details_df.empty and "abn" in details_df.columns:
+        details_df["abn"] = details_df["abn"].astype("string").str.strip()
+        details_df = details_df.drop_duplicates(subset=["abn"], keep="first")
     # If there were no rows returned, ensure columns exist
     if details_df.empty:
         for field in ["abn", *DESIRED_FIELDS]:
@@ -140,16 +152,22 @@ def lambda_handler():
         # Prefer newly fetched columns; drop helper 'abn' if it is duplicate of abn_column
         if abn_column != "abn":
             df.drop(columns=["abn"], inplace=True)
-        # Ensure all desired fields exist (fill missing with empty)
+        # Ensure all desired fields exist and are not NaN
         for field in DESIRED_FIELDS:
             if field not in df.columns:
                 df[field] = ""
+            else:
+                df[field] = df[field].fillna("")
+        # Clean up ABN column post-merge as well
+        df[abn_column] = df[abn_column].astype("string").fillna("").str.strip()
 
     # Write back CSV
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if is_s3:
         local_output = os.path.join(temp_dir, "TaxRecords.enriched.csv")
-        df.to_csv(local_output, index=False)
+        # Replace remaining NaNs with empty strings before writing
+        df = df.fillna("")
+        df.to_csv(local_output, index=False, na_rep="")
         # Backup original object
         backup_key = f"{s3_key}.bak-{timestamp}"
         logger.info(f"Creating backup s3://{s3_bucket}/{backup_key}")
@@ -164,7 +182,9 @@ def lambda_handler():
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
-        df.to_csv(csv_path, index=False)
+        # Replace remaining NaNs with empty strings before writing
+        df = df.fillna("")
+        df.to_csv(csv_path, index=False, na_rep="")
 
     logger.info("Completed enrichment and CSV write")
     return {"statusCode": 200, "body": json.dumps({"rows": len(df)})}
