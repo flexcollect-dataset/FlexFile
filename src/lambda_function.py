@@ -1,26 +1,77 @@
 import json
-import time
 import os
 import logging
 import concurrent.futures
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
-import requests
 import pandas as pd
-import psycopg2
-import psycopg2.extras
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from urllib.parse import urlparse
 import tempfile
 import boto3
 from datetime import datetime, timezone
 
+from src.db_connection import get_connection
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
 ABN_DETAILS_CONCURRENCY = int(os.getenv("ABN_DETAILS_CONCURRENCY", "5"))
+
+DESIRED_FIELDS: List[str] = [
+	"contact",
+	"website",
+	"address",
+	"email",
+	"sociallink",
+	"review",
+	"industry",
+	"documents",
+]
+
+def fetch_details_for_abn(abn: str) -> Dict[str, Any]:
+	"""Fetch details for a single ABN from Postgres, returning a dict with desired fields."""
+	if not abn:
+		return {"abn": "", **{k: "" for k in DESIRED_FIELDS}}
+	conn_local = None
+	try:
+		conn_local = get_connection()
+		logger.info("Connect to the dataset")
+		with conn_local.cursor() as cur:
+			# Try lowercase column name first, then fallback to quoted case
+			try:
+				cur.execute("SELECT * FROM abn WHERE abn = %s LIMIT 1", (abn,))
+			except Exception:
+				cur.execute('SELECT * FROM abn WHERE "Abn" = %s LIMIT 1', (abn,))
+			row = cur.fetchone()
+			if not row:
+				return {"abn": abn, **{k: "" for k in DESIRED_FIELDS}}
+			colnames = [desc.name for desc in cur.description]
+			row_dict = {colnames[i]: row[i] for i in range(len(colnames))}
+			result = {"abn": abn}
+			for field in DESIRED_FIELDS:
+				# Prefer exact field name; allow some common alternates
+				candidates = [
+					field,
+					field.lower(),
+					field.upper(),
+					field.capitalize(),
+				]
+				value = ""
+				for c in candidates:
+					if c in row_dict and row_dict[c] is not None:
+						value = row_dict[c]
+						break
+				result[field] = value
+			return result
+	except Exception as e:
+		logger.warning(f"ABN {abn}: fetch failed: {e}")
+		return {"abn": abn, **{k: "" for k in DESIRED_FIELDS}}
+	finally:
+		if conn_local is not None:
+			try:
+				conn_local.close()
+			except Exception:
+				pass
 
 
 def lambda_handler():
@@ -41,10 +92,9 @@ def lambda_handler():
         s3_client = boto3.client("s3")
         temp_dir = tempfile.mkdtemp(prefix="flexcollect_")
         local_input = os.path.join(temp_dir, "TaxRecords.csv")
-        logger.info(f"Downloading CSV from s3://{s3_bucket}/{s3_key} to {local_input}")
-        s3_client.download_file(s3_bucket, s3_key, local_input)
-        df = pd.read_csv(local_input, low_memory=False)
-        logger.info(f"reading csv file in function")
+		logger.info(f"Downloading CSV from s3://{s3_bucket}/{s3_key} to {local_input}")
+		s3_client.download_file(s3_bucket, s3_key, local_input)
+		df = pd.read_csv(local_input, low_memory=False)
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
@@ -62,81 +112,10 @@ def lambda_handler():
     # Ensure ABN is string type and trimmed
     df[abn_column] = df[abn_column].astype(str).str.strip()
 
-    desired_fields: List[str] = [
-        "contact",
-        "website",
-        "address",
-        "email",
-        "sociallink",
-        "review",
-        "industry",
-        "documents",
-    ]
-
     # Concurrently fetch details per unique ABN
     unique_abns: List[str] = (
         df[abn_column].dropna().astype(str).str.strip().unique().tolist()
     )
-
-    def fetch_details_for_abn(abn: str) -> Dict[str, Any]:
-        """Fetch details for a single ABN from Postgres, returning a dict with desired fields.
-
-        This function opens a short-lived dedicated connection for thread-safety.
-        It selects '*' and extracts only requested fields if present.
-        """
-        if not abn:
-            return {"abn": "", **{k: "" for k in desired_fields}}
-        conn_local = None
-        try:
-            DB_HOST = "flexdataset.cluster-cpoeqq6cwu00.ap-southeast-2.rds.amazonaws.com"
-            DB_NAME = "FlexDataseterMaster"
-            DB_USER = "FlexUser"
-            DB_PASS = "Luffy123&&Lucky"
-            DB_PORT = "5432"
-            conn_local = psycopg2.connect(
-                host=DB_HOST,
-                database=DB_NAME,
-                user=DB_USER,
-                password=DB_PASS,
-                port=DB_PORT,
-            )
-            logger.info(f"Connect to the dataset")
-            with conn_local.cursor() as cur:
-                # Try lowercase column name first, then fallback to quoted case
-                try:
-                    cur.execute("SELECT * FROM abn WHERE abn = %s LIMIT 1", (abn,))
-                except Exception:
-                    cur.execute('SELECT * FROM abn WHERE "Abn" = %s LIMIT 1', (abn,))
-                row = cur.fetchone()
-                if not row:
-                    return {"abn": abn, **{k: "" for k in desired_fields}}
-                colnames = [desc.name for desc in cur.description]
-                row_dict = {colnames[i]: row[i] for i in range(len(colnames))}
-                result = {"abn": abn}
-                for field in desired_fields:
-                    # Prefer exact field name; allow some common alternates
-                    candidates = [
-                        field,
-                        field.lower(),
-                        field.upper(),
-                        field.capitalize(),
-                    ]
-                    value = ""
-                    for c in candidates:
-                        if c in row_dict and row_dict[c] is not None:
-                            value = row_dict[c]
-                            break
-                    result[field] = value
-                return result
-        except Exception as e:
-            logger.warning(f"ABN {abn}: fetch failed: {e}")
-            return {"abn": abn, **{k: "" for k in desired_fields}}
-        finally:
-            if conn_local is not None:
-                try:
-                    conn_local.close()
-                except Exception:
-                    pass
 
     logger.info(
         f"Fetching details for {len(unique_abns)} unique ABNs with concurrency={ABN_DETAILS_CONCURRENCY}"
@@ -149,9 +128,9 @@ def lambda_handler():
 
     # Merge details back into the DataFrame on ABN
     details_df = pd.DataFrame(details)
-    # If there were no rows returned, ensure columns exist
+	# If there were no rows returned, ensure columns exist
     if details_df.empty:
-        for field in ["abn", *desired_fields]:
+		for field in ["abn", *DESIRED_FIELDS]:
             if field not in df.columns:
                 df[field] = ""
     else:
@@ -162,7 +141,7 @@ def lambda_handler():
         if abn_column != "abn":
             df.drop(columns=["abn"], inplace=True)
         # Ensure all desired fields exist (fill missing with empty)
-        for field in desired_fields:
+		for field in DESIRED_FIELDS:
             if field not in df.columns:
                 df[field] = ""
 
