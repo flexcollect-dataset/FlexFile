@@ -22,7 +22,7 @@ def get_connection():
             port=DB_PORT,
         )
     except Exception as exc:
-        logger.error(f"Database connection failed: {exc}")
+        logger.error(f"Database connection failedd: {exc}")
         raise
 
 
