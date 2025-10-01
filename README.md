@@ -81,6 +81,23 @@ Notes:
 - Ensure the container has network access to S3 (public endpoints or VPC endpoint).
 - `boto3` is included in `requirements.txt`.
 
+### Enrichment fields and concurrency
+
+- The task enriches each CSV row by looking up ABN details from Postgres and adding these columns: `contact`, `website`, `address`, `email`, `sociallink`, `review`, `industry`, `documents`.
+- Concurrency is controlled by env var `ABN_DETAILS_CONCURRENCY` (default: 5). Increase it cautiously based on your DB instance size and connection limits.
+- Batch size is not used by the enrichment flow currently but you can keep `BATCH_SIZE` for future extensions.
+
+Required database structure:
+
+- A table `abn` with at least one of the following merge keys: `abn` (lowercase) or quoted `"Abn"`. The enrichment attempts both.
+- The enrichment will map the requested output columns from any matching column names in `abn` (case-insensitive best-effort). Missing fields are written as empty strings.
+
+Environment variables summary:
+
+- `TAX_CSV_S3_URI`: when set to an S3 URI, the task will download, enrich, back up, and upload the CSV in-place. Otherwise it reads and writes `data/TaxRecords.csv` inside the container.
+- `ABN_DETAILS_CONCURRENCY`: number of threads for parallel lookups (default 5).
+- `BATCH_SIZE`: unused by current flow; reserved.
+
 ### Resume and Idempotency
 
 - ABN inserts are idempotent. Table `abn` has a unique index on `Abn` and inserts use `ON CONFLICT (Abn) DO NOTHING`.
