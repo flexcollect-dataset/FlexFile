@@ -16,7 +16,7 @@
         { "name": "ABN_DETAILS_CONCURRENCY", "value": "5" },
         { "name": "GENAI_BATCH_SIZE", "value": "100" },
         { "name": "REQUEST_TIMEOUT", "value": "10" },
-        { "name": "BATCH_PAUSE_SECONDS", "value": "0" }
+        { "name": "BATCH_PAUSE_SECONDS", "value": "0" },
         { "name": "RESUME_FROM_DB", "value": "1" }
       ],
       "entryPoint": ["python","-u","-m","src.lambda_function"],
