@@ -92,9 +92,9 @@ def lambda_handler():
         s3_client = boto3.client("s3")
         temp_dir = tempfile.mkdtemp(prefix="flexcollect_")
         local_input = os.path.join(temp_dir, "TaxRecords.csv")
-		logger.info(f"Downloading CSV from s3://{s3_bucket}/{s3_key} to {local_input}")
-		s3_client.download_file(s3_bucket, s3_key, local_input)
-		df = pd.read_csv(local_input, low_memory=False)
+        logger.info(f"Downloading CSV from s3://{s3_bucket}/{s3_key} to {local_input}")
+        s3_client.download_file(s3_bucket, s3_key, local_input)
+        df = pd.read_csv(local_input, low_memory=False)
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
@@ -130,7 +130,7 @@ def lambda_handler():
     details_df = pd.DataFrame(details)
 	# If there were no rows returned, ensure columns exist
     if details_df.empty:
-		for field in ["abn", *DESIRED_FIELDS]:
+        for field in ["abn", *DESIRED_FIELDS]:
             if field not in df.columns:
                 df[field] = ""
     else:
@@ -141,7 +141,7 @@ def lambda_handler():
         if abn_column != "abn":
             df.drop(columns=["abn"], inplace=True)
         # Ensure all desired fields exist (fill missing with empty)
-		for field in DESIRED_FIELDS:
+        for field in DESIRED_FIELDS:
             if field not in df.columns:
                 df[field] = ""
 
