@@ -1,173 +1,255 @@
 import json
+import time
 import os
 import logging
 import concurrent.futures
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
+import requests
 import pandas as pd
-from urllib.parse import urlparse
-import tempfile
-import boto3
-from datetime import datetime, timezone
+import psycopg2
+import psycopg2.extras
+import xml.etree.ElementTree as ET
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from google import genai
+from google.genai import types
+from pydantic import BaseModel
+from .db_connection import get_connection
 
-from src.db_connection import get_connection
+# --- DB insert function ---
+def insert_batch_to_postgres(batch_df: pd.DataFrame) -> None:
+    if batch_df.empty:
+        return
+
+    conn = get_connection()
+    if not isinstance(conn, psycopg2.extensions.connection):
+        # Defensive: get_connection might have returned an error dict
+        raise RuntimeError("Database connection is not available")
+
+    cursor = conn.cursor()
+    print(batch_df)
+    # Ensure only known columns
+    header_columns = [
+        'Abn', 'AbnStatus', 'AbnStatusEffectiveFrom', 'Acn', 'AddressDate',
+        'AddressPostcode', 'AddressState', 'BusinessName', 'EntityName',
+        'EntityTypeCode', 'EntityTypeName', 'Gst', 'Message', 'Contact',
+        'Website', 'Address', 'Email', 'SocialLink', 'Review', 'Industry',
+        'Documents'
+    ]
+    # # Add any missing expected columns with empty default values
+    # for col in header_columns:
+    #     if col not in batch_df.columns:
+    #         batch_df[col] = ""
+    # batch_df = batch_df[header_columns]
+
+    # # Convert lists/dicts to JSON strings for text columns
+    # batch_df['SocialLink'] = batch_df['SocialLink'].apply(
+    #     lambda x: json.dumps(x) if isinstance(x, (list, dict)) else (x if x is not None else "")
+    # )
+    # batch_df['Documents'] = batch_df['Documents'].apply(
+    #     lambda x: json.dumps(x) if isinstance(x, (list, dict)) else (x if x is not None else "")
+    # )
+
+    # values = [tuple(x) for x in batch_df.to_numpy()]
+
+    # insert_query = """
+    #     INSERT INTO abn
+    #     (Abn, AbnStatus, AbnStatusEffectiveFrom, Acn, AddressDate, AddressPostcode,
+    #      AddressState, BusinessName, EntityName, EntityTypeCode, EntityTypeName, Gst,
+    #      Message, Contact, Website, Address, Email, SocialLink, Review, Industry, Documents)
+    #     VALUES %s
+    #     ON CONFLICT (Abn) DO NOTHING
+    # """
+
+    # psycopg2.extras.execute_values(
+    #     cursor, insert_query, values, template=None, page_size=1000
+    # )
+
+    conn.commit()
+    cursor.close()
+    # Intentionally do not close the connection to enable reuse across invocations
+# --- DB insert function end ---
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# Reduce noise from third-party libraries leaking INFO logs (e.g., AFC notice)
+for noisy_logger_name in ("google", "google.genai", "urllib3", "requests", "httpx"):
+    try:
+        logging.getLogger(noisy_logger_name).setLevel(logging.WARNING)
+    except Exception:
+        pass
+
+# --- Configuration via environment variables ---
+GENAI_API_KEY = os.getenv("GENAI_API_KEY", "AIzaSyD1VmH7wuQVqxld5LeKjF79eRq1gqVrNFA")
+
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
+GENAI_BATCH_SIZE = int(os.getenv("GENAI_BATCH_SIZE", "50"))
 ABN_DETAILS_CONCURRENCY = int(os.getenv("ABN_DETAILS_CONCURRENCY", "5"))
+REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "10"))
+BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "0"))
+RESUME_FROM_DB = os.getenv("RESUME_FROM_DB", "true").lower() in ("1", "true", "yes", "y")
 
-DESIRED_FIELDS: List[str] = [
-	"contact",
-	"website",
-	"address",
-	"email",
-	"sociallink",
-	"review",
-	"industry",
-	"documents",
-]
-
-def fetch_details_for_abn(abn: str) -> Dict[str, Any]:
-	"""Fetch details for a single ABN from Postgres, returning a dict with desired fields."""
-	if not abn:
-		return {"abn": "", **{k: "" for k in DESIRED_FIELDS}}
-	conn_local = None
-	try:
-		conn_local = get_connection()
-		logger.info("Connect to the dataset")
-		with conn_local.cursor() as cur:
-			# Try lowercase column name first, then fallback to quoted case
-			try:
-				cur.execute("SELECT * FROM abn WHERE abn = %s LIMIT 1", (abn,))
-			except Exception:
-				cur.execute('SELECT * FROM abn WHERE "Abn" = %s LIMIT 1', (abn,))
-			row = cur.fetchone()
-			if not row:
-				return {"abn": abn, **{k: "" for k in DESIRED_FIELDS}}
-			colnames = [desc.name for desc in cur.description]
-			row_dict = {colnames[i]: row[i] for i in range(len(colnames))}
-			result = {"abn": abn}
-			for field in DESIRED_FIELDS:
-				# Prefer exact field name; allow some common alternates
-				candidates = [
-					field,
-					field.lower(),
-					field.upper(),
-					field.capitalize(),
-				]
-				value = ""
-				for c in candidates:
-					if c in row_dict and row_dict[c] is not None:
-						value = row_dict[c]
-						break
-				result[field] = value
-			return result
-	except Exception as e:
-		logger.warning(f"ABN {abn}: fetch failed: {e}")
-		return {"abn": abn, **{k: "" for k in DESIRED_FIELDS}}
-	finally:
-		if conn_local is not None:
-			try:
-				conn_local.close()
-			except Exception:
-				pass
+# --- Initialize GenAI client once per container ---
+GENAI_CLIENT = genai.Client(api_key=GENAI_API_KEY) if GENAI_API_KEY else None
 
 
-def lambda_handler():
-    logger.info(f"entering in function")
-    s3_uri = (os.getenv("TAX_CSV_S3_URI") or "").strip()
-    is_s3 = s3_uri.startswith("s3://")
-    temp_dir = None
-    s3_client = None
-    s3_bucket = None
-    s3_key = None
+# --- Models (moved to module scope to avoid redefinition) ---
+class ABNDetails(BaseModel):
+    Contact: str
+    Website: str
+    Address: str
+    Email: str
+    SocialLink: List[str]
+    review: str
+    Industry: str
 
-    if is_s3:
-        parsed = urlparse(s3_uri)
-        s3_bucket = parsed.netloc
-        s3_key = parsed.path.lstrip("/")
-        if not s3_bucket or not s3_key:
-            raise ValueError(f"Invalid TAX_CSV_S3_URI '{s3_uri}'. Expected format s3://bucket/key.csv")
-        s3_client = boto3.client("s3")
-        temp_dir = tempfile.mkdtemp(prefix="flexcollect_")
-        local_input = os.path.join(temp_dir, "TaxRecords.csv")
-        logger.info(f"Downloading CSV from s3://{s3_bucket}/{s3_key} to {local_input}")
-        s3_client.download_file(s3_bucket, s3_key, local_input)
-        df = pd.read_csv(local_input, low_memory=False)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
-        df = pd.read_csv(csv_path, low_memory=False)
+def _search_abns():
+    conn = get_connection()
+    if not isinstance(conn, psycopg2.extensions.connection):
+        # Defensive: get_connection might have returned an error dict
+        raise RuntimeError("Database connection is not available")
 
-    # Normalize ABN column name
-    abn_column = None
-    for candidate in ("abn", "Abn", "ABN"):
-        if candidate in df.columns:
-            abn_column = candidate
-            break
-    if not abn_column:
-        raise ValueError("Input CSV must contain an 'abn' column")
+    cursor = conn.cursor()
+    cursor.execute("SELECT abn FROM abn WHERE entitytypecode = 'IND' LIMIT 1")
+    row = cursor.fetchone()
+    return row
 
-    # Ensure ABN is string type and trimmed
-    df[abn_column] = df[abn_column].astype(str).str.strip()
+def _fetch_abn_details(abn: str) -> Dict[str, Any]:
+    conn = get_connection()
+    if not isinstance(conn, psycopg2.extensions.connection):
+        # Defensive: get_connection might have returned an error dict
+        raise RuntimeError("Database connection is not available")
 
-    # Concurrently fetch details per unique ABN
-    unique_abns: List[str] = (
-        df[abn_column].dropna().astype(str).str.strip().unique().tolist()
-    )
+    cursor = conn.cursor()
+    abn_clean = (abn or "").replace(" ", "")
+    cursor.execute("SELECT * FROM abn WHERE abn = %s LIMIT 1", (abn,))
+    row = cursor.fetchone()
+    return row
 
-    logger.info(
-        f"Fetching details for {len(unique_abns)} unique ABNs with concurrency={ABN_DETAILS_CONCURRENCY}"
-    )
-    details: List[Dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=ABN_DETAILS_CONCURRENCY) as executor:
-        future_to_abn = {executor.submit(fetch_details_for_abn, abn): abn for abn in unique_abns}
-        for future in concurrent.futures.as_completed(future_to_abn):
-            details.append(future.result())
+def lambda_handler(event, context):
+    # --- MAIN LOOP ---
+    abns = _search_abns()
+    logger.info(f"Found {len(abns)} ABNs")
 
-    # Merge details back into the DataFrame on ABN
-    details_df = pd.DataFrame(details)
-	# If there were no rows returned, ensure columns exist
-    if details_df.empty:
-        for field in ["abn", *DESIRED_FIELDS]:
-            if field not in df.columns:
-                df[field] = ""
-    else:
-        # Normalize merge key to the same column name
-        details_df["abn"] = details_df["abn"].astype(str).str.strip()
-        df = df.merge(details_df, how="left", left_on=abn_column, right_on="abn", suffixes=("", "_details"))
-        # Prefer newly fetched columns; drop helper 'abn' if it is duplicate of abn_column
-        if abn_column != "abn":
-            df.drop(columns=["abn"], inplace=True)
-        # Ensure all desired fields exist (fill missing with empty)
-        for field in DESIRED_FIELDS:
-            if field not in df.columns:
-                df[field] = ""
+    # De-duplicate while preserving order
+    seen = set()
+    abns = [a for a in abns if not (a in seen or seen.add(a))]
 
-    # Write back CSV
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    if is_s3:
-        local_output = os.path.join(temp_dir, "TaxRecords.enriched.csv")
-        df.to_csv(local_output, index=False)
-        # Backup original object
-        backup_key = f"{s3_key}.bak-{timestamp}"
-        logger.info(f"Creating backup s3://{s3_bucket}/{backup_key}")
-        s3_client.copy_object(
-            Bucket=s3_bucket,
-            CopySource={"Bucket": s3_bucket, "Key": s3_key},
-            Key=backup_key,
-        )
-        # Upload enriched CSV
-        logger.info(f"Uploading enriched CSV to s3://{s3_bucket}/{s3_key}")
-        s3_client.upload_file(local_output, s3_bucket, s3_key)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
-        df.to_csv(csv_path, index=False)
+    for i in range(0, len(abns), BATCH_SIZE):
+        abn_batch = abns[i:i + BATCH_SIZE]
+        batch_data: List[Dict[str, Any]] = []
 
-    logger.info("Completed enrichment and CSV write")
-    return {"statusCode": 200, "body": json.dumps({"rows": len(df)})}
+        # --- Fetch ABN details concurrently with bounded concurrency ---
+        def _safe_fetch(a: str) -> Tuple[str, Dict[str, Any] | None]:
+            try:
+                details = _fetch_abn_details(a)
+                return a, details
+            except requests.RequestException as e:
+                logger.warning(f"Error fetching ABN {a}: {e}")
+                return a, None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=ABN_DETAILS_CONCURRENCY) as pool:
+            results = list(pool.map(_safe_fetch, abn_batch))
+
+        for details in results:
+            if details is None:
+                continue
+            batch_data.append(details)
+
+        if not batch_data:
+            logger.info(f"No ABN details fetched for batch {i // BATCH_SIZE + 1}")
+            continue
+
+        # --- Build prompts for GenAI where ACN exists ---
+        genai_prompts: List[str] = []
+        genai_indices: List[int] = []
+
+        for idx, item in enumerate(batch_data):
+            entity_name = item.get('EntityName') or (item.get('BusinessName')[0] if item.get('BusinessName') else "")
+            state_code = item.get('AddressState', "")
+            genai_prompts.append(
+                f"give me the website, contact number, social media links, total reviews, Industry and address of '{entity_name}', {state_code}, Australia. I want review in format of 4/5 like that"
+            )
+            genai_indices.append(idx)
+
+        # --- Call Generative AI in batches ---
+        genai_results: List[ABNDetails] = []
+        if GENAI_CLIENT and genai_prompts:
+            for j in range(0, len(genai_prompts), GENAI_BATCH_SIZE):
+                batch_prompts = genai_prompts[j:j + GENAI_BATCH_SIZE]
+                try:
+                    response = GENAI_CLIENT.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=batch_prompts,
+                        config={
+                            "response_mime_type": "application/json",
+                            "response_schema": list[ABNDetails],
+                        },
+                    )
+                    genai_results.extend(response.parsed)
+                except Exception as e:
+                    logger.warning(f"Error in Generative AI batch call (ABN): {e}")
+                    genai_results.extend([
+                        ABNDetails(Contact="", Website="", Address="", Email="", SocialLink=[], review="", Industry="")
+                        for _ in batch_prompts
+                    ])
+        else:
+            # Fill with empty results if client not configured
+            genai_results = [ABNDetails(Contact="", Website="", Address="", Email="", SocialLink=[], review="", Industry="") for _ in genai_prompts]
+
+
+        # --- Combine results back into batch_data ---
+        for offset, idx in enumerate(genai_indices):
+            if offset < len(genai_results):
+                r = genai_results[offset]
+                batch_data[idx]['Contact'] = r.Contact
+                batch_data[idx]['Website'] = r.Website
+                batch_data[idx]['Address'] = r.Address
+                batch_data[idx]['Email'] = r.Email
+                batch_data[idx]['SocialLink'] = r.SocialLink
+                batch_data[idx]['Review'] = r.review
+                batch_data[idx]['Industry'] = r.Industry
+
+        # Ensure defaults for items without ACN or missing fields
+        processed_batch_data: List[Dict[str, Any]] = []
+        for item in batch_data:
+            item.setdefault('Contact', "")
+            item.setdefault('Website', "")
+            item.setdefault('Address', "")
+            item.setdefault('Email', "")
+            item.setdefault('SocialLink', [])
+            item.setdefault('Review', "")
+            item.setdefault('Industry', "")
+            processed_batch_data.append(item)
+
+        # --- Insert into DB ---
+        batch_df = pd.json_normalize(processed_batch_data)
+        if not batch_df.empty:
+            insert_batch_to_postgres(batch_df)
+            logger.info(f"Inserted batch {i // BATCH_SIZE + 1}")
+        else:
+            logger.info(f"No data in batch {i // BATCH_SIZE + 1}")
+
+        if BATCH_PAUSE_SECONDS > 0:
+            time.sleep(BATCH_PAUSE_SECONDS)
+
+       
+
+def _event_from_env():
+    payload = os.getenv("FC_EVENT_JSON")
+    if not payload:
+        return {}
+    try:
+        return json.loads(payload)
+    except Exception:
+        return {}
+
+def main():
+    event = _event_from_env()
+    lambda_handler(event, None)
 
 if __name__ == "__main__":
-    lambda_handler()
+    main()

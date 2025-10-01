@@ -12,9 +12,12 @@
       "image": "IMAGE_URI_TO_REPLACE",
       "essential": true,
       "environment": [
-        { "name": "BATCH_SIZE", "value": "200" },
+        { "name": "BATCH_SIZE", "value": "500" },
         { "name": "ABN_DETAILS_CONCURRENCY", "value": "5" },
-        { "name": "TAX_CSV_S3_URI", "value": "s3://lambdadependency1/TaxRecords.csv" }
+        { "name": "GENAI_BATCH_SIZE", "value": "100" },
+        { "name": "REQUEST_TIMEOUT", "value": "10" },
+        { "name": "BATCH_PAUSE_SECONDS", "value": "0" }
+        { "name": "RESUME_FROM_DB", "value": "1" }
       ],
       "entryPoint": ["python","-u","-m","src.lambda_function"],
       "logConfiguration": {
