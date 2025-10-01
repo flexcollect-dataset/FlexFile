@@ -81,6 +81,51 @@ Notes:
 - Ensure the container has network access to S3 (public endpoints or VPC endpoint).
 - `boto3` is included in `requirements.txt`.
 
+### Merge external dataset onto TaxRecords via ABN
+
+You can merge additional columns from a separate dataset (CSV or Parquet) by matching on the `abn` field. Set these environment variables:
+
+```
+DATASET_S3_URI=s3://my-bucket/path/external_dataset.csv   # or .parquet, or a local path
+DATASET_PREFIX=DS_                                       # optional, prefix for merged columns (default: DS_)
+DATASET_COLUMNS=col1,col2,col3                           # optional, restrict merged columns; defaults to all except `abn`
+DATASET_ONLY=true                                        # when true, perform only the merge and skip Gemini enrichment (default: true)
+```
+
+Requirements and behavior:
+- The dataset must contain a column named `abn` (case-insensitive). ABNs are normalized to digits-only before joining.
+- Supported formats: CSV (built-in) and Parquet (requires `pyarrow`).
+- The merged columns are added to `TaxRecords.csv` with the configured prefix.
+- When `TAX_CSV_S3_URI` is set, the merged CSV is uploaded back to the same key and a timestamped backup of the original is created.
+
+Minimum IAM permissions for the dataset object (in addition to the `TaxRecords.csv` object above):
+
+```
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::my-bucket/path/external_dataset.csv"
+      ]
+    }
+  ]
+}
+```
+
+Example ECS task env entries (see `infra/ecrtask.json`):
+
+```
+{ "name": "DATASET_S3_URI", "value": "s3://lambdadependency1/external_dataset.csv" },
+{ "name": "DATASET_PREFIX", "value": "DS_" },
+{ "name": "DATASET_COLUMNS", "value": "" },
+{ "name": "DATASET_ONLY", "value": "true" }
+```
+
 ### Resume and Idempotency
 
 - ABN inserts are idempotent. Table `abn` has a unique index on `Abn` and inserts use `ON CONFLICT (Abn) DO NOTHING`.

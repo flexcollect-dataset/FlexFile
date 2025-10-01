@@ -131,6 +131,110 @@ def enrich_tax_records_csv():
         csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
         df = pd.read_csv(csv_path, low_memory=False)
 
+    # Optional: ABN-based dataset merge from S3/local dataset file
+    dataset_uri = (os.getenv("DATASET_S3_URI") or "").strip()
+    dataset_only = (os.getenv("DATASET_ONLY", "true").lower() in ("1", "true", "yes"))
+
+    def _normalize_abn_value(value: str) -> str:
+        s = "" if value is None else str(value)
+        digits = "".join(ch for ch in s if ch.isdigit())
+        return digits
+
+    def _ensure_temp_and_client():
+        nonlocal temp_dir, s3_client
+        if temp_dir is None:
+            temp_dir = tempfile.mkdtemp(prefix="flexcollect_")
+        if s3_client is None:
+            s3_client = boto3.client("s3")
+
+    def _download_s3_to_local(uri: str, filename: str) -> str:
+        parsed_uri = urlparse(uri)
+        bucket = parsed_uri.netloc
+        key = parsed_uri.path.lstrip("/")
+        if not bucket or not key:
+            raise ValueError(f"Invalid S3 URI '{uri}'")
+        _ensure_temp_and_client()
+        local_path = os.path.join(temp_dir, filename)
+        logger.info(f"Downloading dataset from s3://{bucket}/{key} to {local_path}")
+        s3_client.download_file(bucket, key, local_path)
+        return local_path
+
+    if dataset_uri:
+        # Load dataset frame
+        if dataset_uri.startswith("s3://"):
+            ext = os.path.splitext(urlparse(dataset_uri).path)[1].lower() or ".csv"
+            local_ds_path = _download_s3_to_local(dataset_uri, f"dataset{ext}")
+        else:
+            local_ds_path = dataset_uri
+
+        try:
+            if local_ds_path.lower().endswith(".parquet"):
+                ds_df = pd.read_parquet(local_ds_path)
+            else:
+                ds_df = pd.read_csv(local_ds_path, low_memory=False)
+        except Exception as e:
+            logger.warning(f"Failed to load dataset from '{dataset_uri}': {e}")
+            ds_df = None
+
+        if ds_df is not None and not ds_df.empty:
+            # Identify ABN column in dataset (case-insensitive)
+            ds_abn_col = None
+            for col in ds_df.columns:
+                if str(col).strip().lower() == "abn":
+                    ds_abn_col = col
+                    break
+            if ds_abn_col is None:
+                logger.warning("Dataset merge skipped: no 'abn' column found in dataset")
+            else:
+                # Normalize ABNs
+                df["abn_norm"] = df.get("abn", pd.Series([None] * len(df))).map(_normalize_abn_value)
+                ds_df["abn_norm"] = ds_df[ds_abn_col].map(_normalize_abn_value)
+
+                # Choose dataset columns to bring across
+                columns_env = (os.getenv("DATASET_COLUMNS") or "").strip()
+                if columns_env:
+                    ds_cols = [c for c in [c.strip() for c in columns_env.split(",")] if c and c in ds_df.columns]
+                else:
+                    ds_cols = [c for c in ds_df.columns if c not in (ds_abn_col, "abn_norm")]
+
+                prefix = os.getenv("DATASET_PREFIX", "DS_")
+                ds_take = ds_df[["abn_norm"] + ds_cols].copy()
+                rename_map = {c: f"{prefix}{c}" for c in ds_cols}
+                ds_take = ds_take.rename(columns=rename_map)
+
+                merged_df = df.merge(ds_take, on="abn_norm", how="left")
+                merged_df = merged_df.drop(columns=["abn_norm"])  # clean up helper key
+                df = merged_df
+                logger.info(f"Merged dataset columns onto TaxRecords.csv via ABN; added {len(ds_cols)} columns")
+
+                if dataset_only:
+                    # Write back immediately and return, skipping Gemini enrichment
+                    if is_s3:
+                        assert s3_client is not None
+                        assert temp_dir is not None
+                        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                        backup_key = f"{s3_key}.bak-{ts}"
+                        logger.info(f"Creating backup s3://{s3_bucket}/{backup_key}")
+                        s3_client.copy_object(Bucket=s3_bucket, CopySource={"Bucket": s3_bucket, "Key": s3_key}, Key=backup_key)
+
+                        local_output = os.path.join(temp_dir, "TaxRecords.out.csv")
+                        df.to_csv(local_output, index=False)
+                        logger.info(f"Uploading merged CSV to s3://{s3_bucket}/{s3_key}")
+                        s3_client.upload_file(local_output, s3_bucket, s3_key)
+
+                        try:
+                            shutil.rmtree(temp_dir)
+                        except Exception:
+                            pass
+                        logger.info(f"Merged CSV written to s3://{s3_bucket}/{s3_key}; backup at s3://{s3_bucket}/{backup_key}")
+                        return f"s3://{s3_bucket}/{s3_key}"
+                    else:
+                        backup_path = str(csv_path) + ".bak"
+                        shutil.copyfile(csv_path, backup_path)
+                        df.to_csv(csv_path, index=False)
+                        logger.info(f"Merged CSV written to {csv_path}; backup at {backup_path}")
+                        return csv_path
+
     # Add enrichment columns if missing
     enrich_cols = ["Contact", "Website", "Address", "Email", "SocialLink", "Review", "Industry_enriched", "Documents"]
     df = _ensure_columns(df, enrich_cols)

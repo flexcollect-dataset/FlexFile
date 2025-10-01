@@ -22,7 +22,11 @@
         { "name": "GST_FILTER", "value": "" },
         { "name": "MAX_POSTCODES", "value": "0" },
         { "name": "POSTCODE_START_INDEX", "value": "0" },
-        { "name": "TAX_CSV_S3_URI", "value": "s3://lambdadependency1/TaxRecords.csv" }
+        { "name": "TAX_CSV_S3_URI", "value": "s3://lambdadependency1/TaxRecords.csv" },
+        { "name": "DATASET_S3_URI", "value": "s3://lambdadependency1/external_dataset.csv" },
+        { "name": "DATASET_PREFIX", "value": "DS_" },
+        { "name": "DATASET_COLUMNS", "value": "" },
+        { "name": "DATASET_ONLY", "value": "true" }
       ],
       "entryPoint": ["python","-u","-m","src.lambda_function"],
       "logConfiguration": {
