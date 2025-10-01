@@ -5,24 +5,13 @@ import logging
 # Set up logging
 logger = logging.getLogger(__name__)
 
-DB_HOST = os.getenv("DB_HOST")
-DB_NAME = os.getenv("DB_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PASS = os.getenv("DB_PASS")
-DB_PORT = int(os.getenv("DB_PORT", "5432"))
+DB_HOST = "flexdataset.cluster-cpoeqq6cwu00.ap-southeast-2.rds.amazonaws.com"
+DB_NAME = "FlexDataseterMaster"
+DB_USER = "FlexUser"
+DB_PASS = "Luffy123&&Lucky"
+DB_PORT = "5432"
 
 def get_connection():
-    if not all([DB_HOST, DB_NAME, DB_USER, DB_PASS]):
-        missing = [
-            name for name, value in (
-                ("DB_HOST", DB_HOST),
-                ("DB_NAME", DB_NAME),
-                ("DB_USER", DB_USER),
-                ("DB_PASS", DB_PASS),
-            ) if not value
-        ]
-        raise ValueError(f"Missing required database settings: {', '.join(missing)}")
-
     logger.info("Creating new database connection")
     try:
         return psycopg2.connect(
