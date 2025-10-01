@@ -15,8 +15,7 @@ from urllib.parse import urlparse
 import tempfile
 import boto3
 from datetime import datetime, timezone
-from .db_connection import get_connection, get_last_processed_postcode, set_last_processed_postcode
-
+from .db_connection import get_connection
 # --- DB insert function ---
 def fetch_batch_to_postgres(abn) -> None:
     conn = get_connection()
@@ -75,6 +74,6 @@ def lambda_handler(event, context):
             abn = str(row.get("abn") or "").strip()
             data = fetch_batch_to_postgres(abn)
             for row in data:
-                print(row[0])
+                print(row)
     except requests.exceptions.RequestException as e:
         logger.error(f"Error connecting to or querying the database: {e}")
