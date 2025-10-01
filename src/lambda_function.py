@@ -15,26 +15,6 @@ from urllib.parse import urlparse
 import tempfile
 import boto3
 from datetime import datetime, timezone
-from .db_connection import get_connection
-# --- DB insert function ---
-def fetch_batch_to_postgres(abn) -> None:
-    conn = get_connection()
-    if not isinstance(conn, psycopg2.extensions.connection):
-        # Defensive: get_connection might have returned an error dict
-        raise RuntimeError("Database connection is not available")
-
-    cursor = conn.cursor()
-    sql_query = "SELECT * FROM abn WHERE id = %s;"
-
-    # Execute the query, passing the variable as a tuple
-    cursor.execute(sql_query, (abn,))
-    rows = cursor.fetchall()
-    conn.commit()
-    cursor.close()
-    return rows
-    # Intentionally do not close the connection to enable reuse across invocations
-# --- DB insert function end ---
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -68,12 +48,141 @@ def lambda_handler(event, context):
         csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
         df = pd.read_csv(csv_path, low_memory=False)
 
+    # Normalize ABN column name
+    abn_column = None
+    for candidate in ("abn", "Abn", "ABN"):
+        if candidate in df.columns:
+            abn_column = candidate
+            break
+    if not abn_column:
+        raise ValueError("Input CSV must contain an 'abn' column")
 
-    try:
-        for i, row in df.iterrows():
-            abn = str(row.get("abn") or "").strip()
-            data = fetch_batch_to_postgres(abn)
-            for row in data:
-                print(row)
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error connecting to or querying the database: {e}")
+    # Ensure ABN is string type and trimmed
+    df[abn_column] = df[abn_column].astype(str).str.strip()
+
+    desired_fields: List[str] = [
+        "contact",
+        "website",
+        "address",
+        "email",
+        "sociallink",
+        "review",
+        "industry",
+        "documents",
+    ]
+
+    # Concurrently fetch details per unique ABN
+    unique_abns: List[str] = (
+        df[abn_column].dropna().astype(str).str.strip().unique().tolist()
+    )
+
+    def fetch_details_for_abn(abn: str) -> Dict[str, Any]:
+        """Fetch details for a single ABN from Postgres, returning a dict with desired fields.
+
+        This function opens a short-lived dedicated connection for thread-safety.
+        It selects '*' and extracts only requested fields if present.
+        """
+        if not abn:
+            return {"abn": "", **{k: "" for k in desired_fields}}
+        conn_local = None
+        try:
+            DB_HOST = "flexdataset.cluster-cpoeqq6cwu00.ap-southeast-2.rds.amazonaws.com"
+            DB_NAME = "FlexDataseterMaster"
+            DB_USER = "FlexUser"
+            DB_PASS = "Luffy123&&Lucky"
+            DB_PORT = "5432"
+            conn_local = psycopg2.connect(
+                host=DB_HOST,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASS,
+                port=DB_PORT,
+            )
+            with conn_local.cursor() as cur:
+                # Try lowercase column name first, then fallback to quoted case
+                try:
+                    cur.execute("SELECT * FROM abn WHERE abn = %s LIMIT 1", (abn,))
+                except Exception:
+                    cur.execute('SELECT * FROM abn WHERE "Abn" = %s LIMIT 1', (abn,))
+                row = cur.fetchone()
+                if not row:
+                    return {"abn": abn, **{k: "" for k in desired_fields}}
+                colnames = [desc.name for desc in cur.description]
+                row_dict = {colnames[i]: row[i] for i in range(len(colnames))}
+                result = {"abn": abn}
+                for field in desired_fields:
+                    # Prefer exact field name; allow some common alternates
+                    candidates = [
+                        field,
+                        field.lower(),
+                        field.upper(),
+                        field.capitalize(),
+                    ]
+                    value = ""
+                    for c in candidates:
+                        if c in row_dict and row_dict[c] is not None:
+                            value = row_dict[c]
+                            break
+                    result[field] = value
+                return result
+        except Exception as e:
+            logger.warning(f"ABN {abn}: fetch failed: {e}")
+            return {"abn": abn, **{k: "" for k in desired_fields}}
+        finally:
+            if conn_local is not None:
+                try:
+                    conn_local.close()
+                except Exception:
+                    pass
+
+    logger.info(
+        f"Fetching details for {len(unique_abns)} unique ABNs with concurrency={ABN_DETAILS_CONCURRENCY}"
+    )
+    details: List[Dict[str, Any]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=ABN_DETAILS_CONCURRENCY) as executor:
+        future_to_abn = {executor.submit(fetch_details_for_abn, abn): abn for abn in unique_abns}
+        for future in concurrent.futures.as_completed(future_to_abn):
+            details.append(future.result())
+
+    # Merge details back into the DataFrame on ABN
+    details_df = pd.DataFrame(details)
+    # If there were no rows returned, ensure columns exist
+    if details_df.empty:
+        for field in ["abn", *desired_fields]:
+            if field not in df.columns:
+                df[field] = ""
+    else:
+        # Normalize merge key to the same column name
+        details_df["abn"] = details_df["abn"].astype(str).str.strip()
+        df = df.merge(details_df, how="left", left_on=abn_column, right_on="abn", suffixes=("", "_details"))
+        # Prefer newly fetched columns; drop helper 'abn' if it is duplicate of abn_column
+        if abn_column != "abn":
+            df.drop(columns=["abn"], inplace=True)
+        # Ensure all desired fields exist (fill missing with empty)
+        for field in desired_fields:
+            if field not in df.columns:
+                df[field] = ""
+
+    # Write back CSV
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if is_s3:
+        local_output = os.path.join(temp_dir, "TaxRecords.enriched.csv")
+        df.to_csv(local_output, index=False)
+        # Backup original object
+        backup_key = f"{s3_key}.bak-{timestamp}"
+        logger.info(f"Creating backup s3://{s3_bucket}/{backup_key}")
+        s3_client.copy_object(
+            Bucket=s3_bucket,
+            CopySource={"Bucket": s3_bucket, "Key": s3_key},
+            Key=backup_key,
+        )
+        # Upload enriched CSV
+        logger.info(f"Uploading enriched CSV to s3://{s3_bucket}/{s3_key}")
+        s3_client.upload_file(local_output, s3_bucket, s3_key)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        csv_path = os.path.normpath(os.path.join(base_dir, "..", "data", "TaxRecords.csv"))
+        df.to_csv(csv_path, index=False)
+
+    logger.info("Completed enrichment and CSV write")
+    return {"statusCode": 200, "body": json.dumps({"rows": len(df)})}
