@@ -113,7 +113,7 @@ def _search_abns():
         raise RuntimeError("Database connection is not available")
 
     cursor = conn.cursor()
-    cursor.execute("SELECT abn FROM abn WHERE entitytypecode = 'IND' LIMIT 1")
+    cursor.execute("SELECT abn FROM abn WHERE entitytypecode = 'IND' AND businessname IS NOT NULL AND businessname <> '' AND businessname <> '{}'")
     row = cursor.fetchone()
     return row
 
@@ -168,16 +168,14 @@ def lambda_handler(event, context):
         genai_indices: List[int] = []
 
         for idx, item in enumerate(batch_data):
-            print(idx)
-            print(item)
-
-            entity_name = item.get('EntityName') or (item.get('BusinessName')[0] if item.get('BusinessName') else "")
-            state_code = item.get('AddressState', "")
+            entity_name = item[8]
+            state_code = item[6]
             genai_prompts.append(
                 f"give me the website, contact number, social media links, total reviews, Industry and address of '{entity_name}', {state_code}, Australia. I want review in format of 4/5 like that"
             )
             genai_indices.append(idx)
-
+            print(genai_indices)
+            print(genai_prompts)
         # --- Call Generative AI in batches ---
         genai_results: List[ABNDetails] = []
         if GENAI_CLIENT and genai_prompts:
