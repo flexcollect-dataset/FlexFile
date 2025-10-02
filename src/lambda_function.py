@@ -114,8 +114,9 @@ def _search_abns():
 
     cursor = conn.cursor()
     cursor.execute("SELECT abn FROM abn WHERE entitytypecode = 'IND' AND businessname IS NOT NULL AND businessname <> '' AND businessname <> '{}'")
-    row = cursor.fetchone()
-    return row
+    rows = cursor.fetchall()
+    # Return a flat list of ABN strings
+    return [r[0] for r in rows]
 
 def _fetch_abn_details(abn: str) -> Dict[str, Any]:
     conn = get_connection()
@@ -123,11 +124,12 @@ def _fetch_abn_details(abn: str) -> Dict[str, Any]:
         # Defensive: get_connection might have returned an error dict
         raise RuntimeError("Database connection is not available")
 
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     abn_clean = (abn or "").replace(" ", "")
-    cursor.execute("SELECT * FROM abn WHERE abn = %s LIMIT 1", (abn,))
+    cursor.execute("SELECT * FROM abn WHERE abn = %s LIMIT 1", (abn_clean,))
     row = cursor.fetchone()
-    return row
+    # Ensure a regular dict is returned (RealDictCursor already does this)
+    return dict(row) if row else {}
 
 def lambda_handler(event, context):
     # --- MAIN LOOP ---
@@ -168,8 +170,27 @@ def lambda_handler(event, context):
         genai_indices: List[int] = []
 
         for idx, item in enumerate(batch_data):
-            entity_name = item[8]
-            state_code = item[6]
+            # Support dict-shaped rows
+            if isinstance(item, dict):
+                entity_name = (
+                    item.get('EntityName')
+                    or item.get('entityname')
+                    or item.get('businessname')
+                    or ""
+                )
+                state_code = (
+                    item.get('AddressState')
+                    or item.get('addressstate')
+                    or ""
+                )
+            else:
+                # Fallback for tuple-shaped rows (should no longer occur)
+                try:
+                    entity_name = item[8]
+                    state_code = item[6]
+                except Exception:
+                    entity_name = ""
+                    state_code = ""
             genai_prompts.append(
                 f"give me the website, contact number, social media links, total reviews, Industry and address of '{entity_name}', {state_code}, Australia. I want review in format of 4/5 like that"
             )
@@ -206,6 +227,9 @@ def lambda_handler(event, context):
         for offset, idx in enumerate(genai_indices):
             if offset < len(genai_results):
                 r = genai_results[offset]
+                # Ensure mutable dict entries for enrichment
+                if not isinstance(batch_data[idx], dict):
+                    batch_data[idx] = {}
                 batch_data[idx]['Contact'] = r.Contact
                 batch_data[idx]['Website'] = r.Website
                 batch_data[idx]['Address'] = r.Address
@@ -217,6 +241,9 @@ def lambda_handler(event, context):
         # Ensure defaults for items without ACN or missing fields
         processed_batch_data: List[Dict[str, Any]] = []
         for item in batch_data:
+            # Ensure we are working with dicts
+            if not isinstance(item, dict):
+                item = {}
             item.setdefault('Contact', "")
             item.setdefault('Website', "")
             item.setdefault('Address', "")
