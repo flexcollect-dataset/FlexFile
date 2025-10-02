@@ -168,6 +168,7 @@ def lambda_handler(event, context):
         genai_indices: List[int] = []
 
         for idx, item in enumerate(batch_data):
+            print(item)
             entity_name = item.get('EntityName') or (item.get('BusinessName')[0] if item.get('BusinessName') else "")
             state_code = item.get('AddressState', "")
             genai_prompts.append(
