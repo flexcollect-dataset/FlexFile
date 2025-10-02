@@ -140,13 +140,13 @@ def lambda_handler(event, context):
 
     for i in range(0, len(abns), BATCH_SIZE):
         abn_batch = abns[i:i + BATCH_SIZE]
-        batch_data: List[Dict[str, Any]] = []
+        batch_data = []
 
         # --- Fetch ABN details concurrently with bounded concurrency ---
-        def _safe_fetch(a: str) -> Tuple[str, Dict[str, Any] | None]:
+        def _safe_fetch(a: str):
             try:
                 details = _fetch_abn_details(a)
-                return a, details
+                return details
             except requests.RequestException as e:
                 logger.warning(f"Error fetching ABN {a}: {e}")
                 return a, None
@@ -170,6 +170,7 @@ def lambda_handler(event, context):
         for idx, item in enumerate(batch_data):
             print(idx)
             print(item)
+
             entity_name = item.get('EntityName') or (item.get('BusinessName')[0] if item.get('BusinessName') else "")
             state_code = item.get('AddressState', "")
             genai_prompts.append(
