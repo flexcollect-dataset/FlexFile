@@ -274,7 +274,6 @@ def lambda_handler(event, context):
         # --- Insert into DB ---
         batch_df = pd.json_normalize(processed_batch_data)
         if not batch_df.empty:
-            print(batch_df)
             insert_batch_to_postgres(batch_df)
             logger.info(f"Inserted batch {i // BATCH_SIZE + 1}")
         else:
