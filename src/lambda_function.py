@@ -28,43 +28,62 @@ def insert_batch_to_postgres(batch_df: pd.DataFrame) -> None:
         raise RuntimeError("Database connection is not available")
 
     cursor = conn.cursor()
-    print(batch_df)
-    # Ensure only known columns
-    header_columns = [
-        'Abn', 'AbnStatus', 'AbnStatusEffectiveFrom', 'Acn', 'AddressDate',
-        'AddressPostcode', 'AddressState', 'BusinessName', 'EntityName',
-        'EntityTypeCode', 'EntityTypeName', 'Gst', 'Message', 'Contact',
-        'Website', 'Address', 'Email', 'SocialLink', 'Review', 'Industry',
-        'Documents'
-    ]
-    # # Add any missing expected columns with empty default values
-    # for col in header_columns:
-    #     if col not in batch_df.columns:
-    #         batch_df[col] = ""
-    # batch_df = batch_df[header_columns]
 
-    # # Convert lists/dicts to JSON strings for text columns
-    # batch_df['SocialLink'] = batch_df['SocialLink'].apply(
-    #     lambda x: json.dumps(x) if isinstance(x, (list, dict)) else (x if x is not None else "")
-    # )
-    # batch_df['Documents'] = batch_df['Documents'].apply(
-    #     lambda x: json.dumps(x) if isinstance(x, (list, dict)) else (x if x is not None else "")
-    # )
+    # Prepare parameterized UPDATE for Gemini-enriched fields, matched by ABN
+    update_sql = (
+        """
+        UPDATE abn
+        SET contact = %s,
+            website = %s,
+            address = %s,
+            email = %s,
+            sociallink = %s,
+            review = %s,
+            industry = %s
+        WHERE replace(abn, ' ', '') = %s
+        """
+    )
 
-    # values = [tuple(x) for x in batch_df.to_numpy()]
+    records = batch_df.to_dict(orient="records")
+    params: List[Tuple[Any, ...]] = []
 
-    # insert_query = """
-    #     INSERT INTO abn
-    #     (Abn, AbnStatus, AbnStatusEffectiveFrom, Acn, AddressDate, AddressPostcode,
-    #      AddressState, BusinessName, EntityName, EntityTypeCode, EntityTypeName, Gst,
-    #      Message, Contact, Website, Address, Email, SocialLink, Review, Industry, Documents)
-    #     VALUES %s
-    #     ON CONFLICT (Abn) DO NOTHING
-    # """
+    for rec in records:
+        # Resolve ABN from various potential keys and normalize by removing spaces
+        abn_value = (
+            rec.get('abn')
+            or rec.get('Abn')
+            or rec.get('ABN')
+            or rec.get('accountNumber')
+        )
+        if not abn_value:
+            continue
+        abn_normalized = str(abn_value).replace(" ", "")
 
-    # psycopg2.extras.execute_values(
-    #     cursor, insert_query, values, template=None, page_size=1000
-    # )
+        # Extract fields (allow both TitleCase and lowercase keys)
+        def as_text(value: Any) -> str:
+            if value is None:
+                return ""
+            return value if isinstance(value, str) else json.dumps(value)
+
+        contact = as_text(rec.get('Contact') if 'Contact' in rec else rec.get('contact'))
+        website = as_text(rec.get('Website') if 'Website' in rec else rec.get('website'))
+        address = as_text(rec.get('Address') if 'Address' in rec else rec.get('address'))
+        email = as_text(rec.get('Email') if 'Email' in rec else rec.get('email'))
+
+        social_value = rec.get('SocialLink') if 'SocialLink' in rec else rec.get('sociallink')
+        if isinstance(social_value, (list, dict)) or social_value is None:
+            social_param: Any = psycopg2.extras.Json(social_value or [])
+        else:
+            # string or other scalar; store as-is
+            social_param = as_text(social_value)
+
+        review = as_text(rec.get('Review') if 'Review' in rec else rec.get('review'))
+        industry = as_text(rec.get('Industry') if 'Industry' in rec else rec.get('industry'))
+
+        params.append((contact, website, address, email, social_param, review, industry, abn_normalized))
+
+    if params:
+        psycopg2.extras.execute_batch(cursor, update_sql, params, page_size=100)
 
     conn.commit()
     cursor.close()
