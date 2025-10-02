@@ -195,8 +195,7 @@ def lambda_handler(event, context):
                 f"give me the website, contact number, social media links, total reviews, Industry and address of '{entity_name}', {state_code}, Australia. I want review in format of 4/5 like that"
             )
             genai_indices.append(idx)
-            print(genai_indices)
-            print(genai_prompts)
+
         # --- Call Generative AI in batches ---
         genai_results: List[ABNDetails] = []
         if GENAI_CLIENT and genai_prompts:
@@ -256,6 +255,7 @@ def lambda_handler(event, context):
         # --- Insert into DB ---
         batch_df = pd.json_normalize(processed_batch_data)
         if not batch_df.empty:
+            print(batch_df)
             insert_batch_to_postgres(batch_df)
             logger.info(f"Inserted batch {i // BATCH_SIZE + 1}")
         else:
